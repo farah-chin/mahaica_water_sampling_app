@@ -1,9 +1,7 @@
+.Renviron
 .Rproj.user
 .Rhistory
 .RData
 .Ruserdata
-.Renviron
 rsconnect/
 renv/library
-data/
-*.csv
