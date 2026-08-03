@@ -1,0 +1,600 @@
+server <- function(input, output, session) {
+  
+  # Date slider ----
+  output$date_slider_ui <- renderUI({
+    dates <- sort(unique(readings$Date_parsed))
+    sliderInput("date_range", NULL,
+                min        = min(dates),
+                max        = max(dates),
+                value      = c(min(dates), max(dates)),
+                timeFormat = "%b %Y",
+                step       = 30)
+  })
+  
+  # Correlation parameter picker ----
+  output$corr_param_ui <- renderUI({
+    selectInput("corr_param2", "Correlate with:",
+                choices  = setdiff(PARAMETERS, input$param),
+                selected = if ("Salinity (PPT)" != input$param) "Salinity (PPT)" else "pH")
+  })
+  
+  ## Filtered Reactives ----
+  
+  # Debounce all inputs by 400ms so charts don't re-render on every
+  # intermediate value during rapid slider drags or dropdown changes
+  param_d         <- reactive(input$param)         %>% debounce(400)
+  season_d        <- reactive(input$season)        %>% debounce(400)
+  site_filter_d   <- reactive(input$site_filter)   %>% debounce(400)
+  date_range_d    <- reactive(input$date_range)    %>% debounce(400)
+  corr_param2_d   <- reactive(input$corr_param2)   %>% debounce(400)
+  detail_site_d   <- reactive(input$detail_site)   %>% debounce(400)
+  detail_season_d <- reactive(input$detail_season) %>% debounce(400)
+  
+  # Map bounds — updated on zoom/pan with 600ms debounce to avoid thrashing
+  map_bounds <- reactive({ input$map_bounds }) %>% debounce(600)
+  
+  # Sites whose coordinates fall within the current map extent
+  visible_sites <- reactive({
+    bounds <- map_bounds()
+    if (is.null(bounds)) return(unique(locations$SiteID))
+    locations %>%
+      filter(DDLat >= bounds$south, DDLat <= bounds$north,
+             DDLon >= bounds$west,  DDLon <= bounds$east) %>%
+      pull(SiteID)
+  })
+  
+  fdata <- reactive({
+    req(date_range_d())
+    d <- readings %>%
+      filter(Date_parsed >= date_range_d()[1],
+             Date_parsed <= date_range_d()[2],
+             SiteID %in% visible_sites())
+    if (season_d() != "All") d <- d %>% filter(Season == season_d())
+    if (site_filter_d() != "All sites") d <- d %>% filter(SiteID == site_filter_d())
+    d
+  })
+  
+  param_data <- reactive({
+    fdata() %>% filter(Attribute == param_d())
+  })
+  
+  ## Map Observers ----
+  
+  # Swap basemap tile without resetting view or clearing markers
+  observeEvent(input$map_base, {
+    leafletProxy("map") %>% addProviderTiles(input$map_base)
+  })
+  
+  # Click marker → select/deselect site in dropdown
+  observeEvent(input$map_marker_click, {
+    clicked <- input$map_marker_click$id
+    if (!is.null(clicked)) {
+      current <- isolate(input$site_filter)
+      new_val <- if (identical(current, clicked)) "All sites" else clicked
+      updateSelectInput(session, "site_filter", selected = new_val)
+    }
+  })
+  
+  # Dropdown selection → zoom map to site (or reset to full extent)
+  observeEvent(input$site_filter, {
+    if (input$site_filter == "All sites") {
+      leafletProxy("map") %>%
+        setView(lng = MAP_CENTER$lng, lat = MAP_CENTER$lat, zoom = MAP_CENTER$zoom)
+    } else {
+      loc <- locations %>% filter(SiteID == input$site_filter)
+      if (nrow(loc) > 0)
+        leafletProxy("map") %>%
+        setView(lng = loc$DDLon, lat = loc$DDLat, zoom = SITE_ZOOM)
+    }
+  }, ignoreInit = TRUE)
+  
+  ## Value Boxes ----
+  
+  make_vbox <- function(label, value, icon_name, color) {
+    value_box(
+      title    = label,
+      value    = value,
+      showcase = icon(icon_name, style = "font-size:1rem;"),
+      theme    = color,
+      height   = "90px"
+    )
+  }
+  
+  output$vbox_mean <- renderUI({
+    v <- mean(param_data()$Value, na.rm = TRUE)
+    make_vbox(paste("Mean", param_d()),
+              paste0(round(v, 2), " ", param_unit(param_d())),
+              "chart-bar", "primary")
+  })
+  output$vbox_min <- renderUI({
+    v <- min(param_data()$Value, na.rm = TRUE)
+    make_vbox("Minimum",
+              paste0(round(v, 2), " ", param_unit(param_d())),
+              "arrow-down", "info")
+  })
+  output$vbox_max <- renderUI({
+    v <- max(param_data()$Value, na.rm = TRUE)
+    make_vbox("Maximum",
+              paste0(round(v, 2), " ", param_unit(param_d())),
+              "arrow-up", "warning")
+  })
+  output$vbox_sites <- renderUI({
+    n <- n_distinct(param_data()$SiteID)
+    make_vbox("Active Sites", n, "map-marker-alt", "success")
+  })
+  
+  ## Map ----
+  
+  # Full summary across ALL sites — used to fix colour scale domain so colours
+  # don't shift when the map extent changes
+  site_summary_full <- reactive({
+    req(date_range_d())
+    d <- readings %>%
+      filter(Attribute == param_d(),
+             Date_parsed >= date_range_d()[1],
+             Date_parsed <= date_range_d()[2])
+    if (season_d() != "All") d <- d %>% filter(Season == season_d())
+    if (site_filter_d() != "All sites") d <- d %>% filter(SiteID == site_filter_d())
+    d %>%
+      group_by(SiteID, DDLat, DDLon, Name, Habitat, Description, Distance_from_mouth) %>%
+      summarise(mean_val = mean(Value, na.rm = TRUE),
+                n_obs    = n(),
+                .groups  = "drop")
+  })
+  
+  output$map <- renderLeaflet({
+    leaflet() %>%
+      addProviderTiles("Esri.WorldImagery") %>%
+      setView(lng = MAP_CENTER$lng, lat = MAP_CENTER$lat, zoom = MAP_CENTER$zoom) %>%
+      htmlwidgets::onRender("
+        function(el, x) {
+          var map = this;
+          function reportBounds() {
+            var b = map.getBounds();
+            Shiny.setInputValue('map_bounds', {
+              north: b.getNorth(), south: b.getSouth(),
+              east:  b.getEast(),  west:  b.getWest()
+            });
+          }
+          map.on('moveend', reportBounds);
+          reportBounds();
+        }
+      ")
+  })
+  
+  observe({
+    ss <- site_summary_full()
+    req(nrow(ss) > 0)
+    
+    pal <- colorNumeric("RdYlBu", domain = ss$mean_val, reverse = TRUE)
+    
+    proxy <- leafletProxy("map") %>%
+      clearMarkers() %>%
+      clearControls() %>%
+      clearGroup("waterways")
+    
+    # River features drawn first so they sit underneath all point markers
+    if (isTRUE(input$show_waterways) && !is.null(waterways_geojson)) {
+      proxy %>%
+        addGeoJSON(
+          geojson    = waterways_geojson,
+          group      = "waterways",
+          color      = "#4A90D9",
+          weight     = 2,
+          opacity    = 0.7,
+          fill       = FALSE
+        )
+    }
+    
+    proxy %>%
+      addCircleMarkers(
+        data        = ss,
+        lng         = ~DDLon,
+        lat         = ~DDLat,
+        layerId     = ~SiteID,
+        radius      = 8,
+        fillColor   = ~pal(mean_val),
+        color       = "white",
+        weight      = 1.5,
+        fillOpacity = 0.85,
+        label       = ~lapply(paste0(
+          "<b>", SiteID, " \u2013 ", Name, "</b><br>",
+          "<i>", Habitat, "</i><br>",
+          "<b>", param_d(), ":</b> ", round(mean_val, 2), " ", param_unit(param_d()), "<br>",
+          "<b>Observations:</b> ", n_obs, "<br>",
+          "<b>Distance from mouth:</b> ", round(Distance_from_mouth, 1), " km<br><br>",
+          "<small>", Description, "</small>"
+        ), htmltools::HTML),
+        labelOptions = labelOptions(
+          style     = TOOLTIP_LABEL_STYLE,
+          direction = "top",
+          textsize  = "12px"
+        )
+      ) %>%
+      addLegend(
+        position = "bottomright",
+        pal      = pal,
+        values   = ss$mean_val,
+        title    = paste0(param_d(), "<br>(", param_unit(param_d()), ")"),
+        opacity  = 0.85
+      )
+    
+    # Otter sightings layer
+    proxy %>% clearGroup("otters")
+    if (isTRUE(input$show_otters) && !is.null(otter_data) && nrow(otter_data) > 0) {
+      od <- otter_data %>%
+        mutate(fill_col = dplyr::recode(Species,
+                                        "Giant River Otter" = "#A63600",
+                                        "Neotropical Otter" = "#4C7300",
+                                        .default = "#888888"
+        ))
+      
+      icons     <- lapply(od$fill_col, function(col)
+        makeIcon(iconUrl = make_diamond_icon(col),
+                 iconWidth = 18, iconHeight = 18,
+                 iconAnchorX = 9, iconAnchorY = 9))
+      icon_list <- do.call(iconList, icons)
+      
+      proxy %>%
+        addMarkers(
+          data         = od,
+          lng          = ~Long,
+          lat          = ~Lat,
+          group        = "otters",
+          icon         = icon_list,
+          label        = ~lapply(paste0(
+            "<b>", Species, "</b><br>",
+            "<b>Date:</b> ", Date, "<br>",
+            "<b>Count:</b> ", No_OttersSighted, "<br>",
+            "<b>Observer:</b> ", ObservedBy, "<br>",
+            ifelse(!is.na(Notes) & Notes != "", paste0("<b>Notes:</b> ", Notes), "")
+          ), htmltools::HTML),
+          labelOptions = labelOptions(
+            style     = TOOLTIP_LABEL_STYLE,
+            direction = "top"
+          )
+        ) %>%
+        addLegend(
+          position = "bottomleft",
+          colors   = unname(OTTER_COLS),
+          labels   = names(OTTER_COLS),
+          title    = "Otter Species",
+          opacity  = 0.9
+        )
+    }
+    
+    if (isTRUE(input$show_labels)) {
+      proxy %>%
+        addLabelOnlyMarkers(
+          data         = ss,
+          lng          = ~DDLon,
+          lat          = ~DDLat,
+          label        = ~SiteID,
+          labelOptions = labelOptions(
+            noHide    = TRUE,
+            direction = "top",
+            textsize  = "11px",
+            style     = list(
+              "font-weight"      = "bold",
+              "background-color" = "rgba(255,255,255,0.6)",
+              "border"           = "none",
+              "box-shadow"       = "none",
+              "padding"          = "1px 4px"
+            )
+          )
+        )
+    }
+  })
+  
+  ## Longitudinal Profile ----
+  
+  output$longitudinal_plot <- renderPlotly({
+    if (season_d() == "All") {
+      d_season <- param_data() %>%
+        group_by(SiteID, Distance_from_mouth, Season) %>%
+        summarise(mean_val = mean(Value, na.rm = TRUE), .groups = "drop") %>%
+        arrange(Distance_from_mouth)
+      
+      d_all <- param_data() %>%
+        group_by(SiteID, Distance_from_mouth) %>%
+        summarise(mean_val = mean(Value, na.rm = TRUE),
+                  sd_val   = sd(Value, na.rm = TRUE), .groups = "drop") %>%
+        arrange(Distance_from_mouth)
+      
+      p <- ggplot() +
+        geom_ribbon(data = d_all,
+                    aes(x = Distance_from_mouth,
+                        ymin = mean_val - sd_val, ymax = mean_val + sd_val),
+                    fill = "grey60", alpha = 0.2, color = NA) +
+        geom_line(data  = d_season,
+                  aes(x = Distance_from_mouth, y = mean_val,
+                      color = Season, group = Season),
+                  linewidth = 0.9) +
+        geom_point(data = d_season,
+                   aes(x = Distance_from_mouth, y = mean_val, color = Season),
+                   size = 2.5) +
+        geom_line(data  = d_all,
+                  aes(x = Distance_from_mouth, y = mean_val, group = 1),
+                  color = "grey20", linewidth = 1, linetype = "dashed") +
+        geom_point(data = d_all,
+                   aes(x = Distance_from_mouth, y = mean_val, group = 1),
+                   color = "grey20", size = 2) +
+        scale_color_manual(values = SEASON_COLS, na.value = "grey50") +
+        labs(x = "Distance from River Mouth (km)",
+             y = paste0(param_d(), " (", param_unit(param_d()), ")"),
+             color = NULL) +
+        theme_minimal(base_size = 11) +
+        theme(legend.position = "top")
+    } else {
+      d <- param_data() %>%
+        group_by(SiteID, Distance_from_mouth) %>%
+        summarise(mean_val = mean(Value, na.rm = TRUE),
+                  sd_val   = sd(Value, na.rm = TRUE), .groups = "drop") %>%
+        arrange(Distance_from_mouth)
+      
+      season_col <- SEASON_COLS[season_d()]
+      
+      p <- ggplot(d, aes(x = Distance_from_mouth, y = mean_val)) +
+        geom_ribbon(aes(ymin = mean_val - sd_val, ymax = mean_val + sd_val),
+                    fill = season_col, alpha = 0.2, color = NA) +
+        geom_line(color = season_col, linewidth = 0.9) +
+        geom_point(color = season_col, size = 2.5) +
+        labs(x = "Distance from River Mouth (km)",
+             y = paste0(param_d(), " (", param_unit(param_d()), ")")) +
+        theme_minimal(base_size = 11)
+    }
+    
+    ggplotly(p, tooltip = c("x", "y", "colour")) %>%
+      layout(hovermode = "x unified")
+  })
+  
+  ## Time Series ----
+  
+  output$timeseries_plot <- renderPlotly({
+    show_all_sites   <- site_filter_d() == "All sites"
+    show_all_seasons <- season_d() == "All"
+    
+    if (show_all_sites) {
+      d_all <- param_data() %>%
+        group_by(Date_parsed) %>%
+        summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop")
+      
+      p <- ggplot(d_all, aes(x = Date_parsed, y = Value, group = 1)) +
+        geom_line(color = "grey20", linewidth = 1.2, linetype = "dashed") +
+        geom_point(color = "grey20", size = 2.5) +
+        labs(x = NULL,
+             y = paste0(param_d(), " (", param_unit(param_d()), ")")) +
+        theme_minimal(base_size = 11) +
+        theme(legend.position = "none")
+    } else {
+      d <- param_data() %>%
+        group_by(SiteID, Date_parsed, Season) %>%
+        summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop")
+      
+      if (show_all_seasons) {
+        # Overall mean (black dashed) + per-season thinner lines
+        d_overall <- d %>%
+          group_by(Date_parsed) %>%
+          summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop")
+        d_season <- d %>%
+          group_by(Date_parsed, Season) %>%
+          summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop")
+        
+        p <- ggplot() +
+          geom_line(data = d_season,
+                    aes(x = Date_parsed, y = Value, color = Season, group = Season),
+                    linewidth = 0.6, alpha = 0.8) +
+          geom_line(data = d_overall,
+                    aes(x = Date_parsed, y = Value, group = 1),
+                    color = "grey20", linewidth = 1.2, linetype = "dashed") +
+          geom_point(data = d_overall,
+                     aes(x = Date_parsed, y = Value, group = 1),
+                     color = "grey20", size = 2.5) +
+          scale_color_manual(values = SEASON_COLS, na.value = "grey50") +
+          labs(x = NULL,
+               y = paste0(param_d(), " (", param_unit(param_d()), ")"),
+               color = NULL) +
+          theme_minimal(base_size = 11) +
+          theme(legend.position = "top")
+      } else {
+        line_col <- SEASON_COLS[season_d()]
+        p <- ggplot(d, aes(x = Date_parsed, y = Value, group = SiteID)) +
+          geom_line(alpha = 0.7, linewidth = 0.7, color = line_col) +
+          geom_point(size = 2, alpha = 0.8, color = line_col) +
+          labs(x = NULL,
+               y = paste0(param_d(), " (", param_unit(param_d()), ")")) +
+          theme_minimal(base_size = 11) +
+          theme(legend.position = "none")
+      }
+    }
+    
+    ggplotly(p, tooltip = c("x", "y")) %>%
+      layout(hovermode = "x unified")
+  })
+  
+  ## Season Box Plot ----
+  
+  output$boxplot_season <- renderPlotly({
+    req(date_range_d())
+    d <- readings %>%
+      filter(Attribute == param_d(),
+             !is.na(Season),
+             Date_parsed >= date_range_d()[1],
+             Date_parsed <= date_range_d()[2])
+    if (site_filter_d() != "All sites") d <- d %>% filter(SiteID == site_filter_d())
+    
+    p <- ggplot(d, aes(x = Season, y = Value, fill = Season)) +
+      geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 2) +
+      geom_jitter(width = 0.15, alpha = 0.3, size = 1) +
+      scale_fill_manual(values = SEASON_COLS) +
+      labs(x = NULL,
+           y = paste0(param_d(), " (", param_unit(param_d()), ")")) +
+      theme_minimal(base_size = 11) +
+      theme(legend.position = "none")
+    
+    ggplotly(p)
+  })
+  
+  ## Heatmap ----
+  
+  output$heatmap_plot <- renderPlotly({
+    # Intentionally ignores map extent so all sites remain visible for context
+    req(date_range_d())
+    d <- readings %>%
+      filter(Attribute == param_d(),
+             Date_parsed >= date_range_d()[1],
+             Date_parsed <= date_range_d()[2])
+    if (season_d() != "All") d <- d %>% filter(Season == season_d())
+    if (site_filter_d() != "All sites") d <- d %>% filter(SiteID == site_filter_d())
+    
+    d <- d %>%
+      group_by(SiteID, YearMon) %>%
+      summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop") %>%
+      mutate(SiteID = factor(SiteID, levels = paste0("M", 1:25)))
+    
+    p <- ggplot(d, aes(x = YearMon, y = SiteID, fill = Value)) +
+      geom_tile(color = "white", linewidth = 0.3) +
+      scale_fill_distiller(palette = "RdYlBu", direction = 1,
+                           name = param_unit(param_d())) +
+      labs(x = NULL, y = "Site") +
+      theme_minimal(base_size = 10) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            legend.position = "right")
+    
+    ggplotly(p) %>% layout(xaxis = list(tickangle = -45))
+  })
+  
+  ## Correlation Scatter ----
+  
+  output$scatter_corr <- renderPlotly({
+    req(corr_param2_d())
+    
+    d_wide <- fdata() %>%
+      filter(Attribute %in% c(param_d(), corr_param2_d())) %>%
+      select(SiteID, Date_parsed, Season, Attribute, Value) %>%
+      pivot_wider(names_from = Attribute, values_from = Value, values_fn = mean) %>%
+      rename(x_val = all_of(param_d()), y_val = all_of(corr_param2_d())) %>%
+      filter(!is.na(x_val), !is.na(y_val)) %>%
+      mutate(tooltip = paste0("Site: ", SiteID, "<br>Date: ", Date_parsed))
+    
+    p <- ggplot(d_wide, aes(x = x_val, y = y_val, color = Season)) +
+      geom_point(alpha = 0.65, size = 2.5) +
+      geom_smooth(method = "lm", se = TRUE, linewidth = 0.8,
+                  aes(group = Season), alpha = 0.1) +
+      scale_color_manual(values = SEASON_COLS, na.value = "grey60") +
+      labs(x = paste0(param_d(), " (", param_unit(param_d()), ")"),
+           y = paste0(corr_param2_d(), " (", param_unit(corr_param2_d()), ")"),
+           color = NULL) +
+      theme_minimal(base_size = 11)
+    
+    if (season_d() == "All") {
+      p <- p +
+        geom_smooth(data = d_wide,
+                    aes(x = x_val, y = y_val, group = 1),
+                    method = "lm", se = TRUE,
+                    color = "grey20", fill = "grey70",
+                    linewidth = 1, linetype = "dashed",
+                    alpha = 0.15,
+                    inherit.aes = FALSE)
+    }
+    
+    ggplotly(p, tooltip = c("colour", "x", "y", "text")) %>%
+      style(text = d_wide$tooltip, traces = 1)
+  })
+  
+  ## Site Detail Tab ----
+  
+  detail_data <- reactive({
+    d <- readings %>% filter(SiteID == detail_site_d())
+    if (detail_season_d() != "All") d <- d %>% filter(Season == detail_season_d())
+    d
+  })
+  
+  output$site_info_card <- renderUI({
+    loc <- locations %>% filter(SiteID == detail_site_d())
+    req(nrow(loc) > 0)
+    tagList(
+      tags$h6(loc$Name, class = "fw-bold"),
+      tags$p(tags$small(loc$Description)),
+      tags$hr(),
+      tags$table(
+        class = "table table-sm table-borderless",
+        tags$tbody(
+          tags$tr(tags$td(icon("tree"),    " Habitat"),
+                  tags$td(tags$small(loc$Habitat))),
+          tags$tr(tags$td(icon("ruler"),   " Dist. from mouth"),
+                  tags$td(tags$small(round(loc$Distance_from_mouth, 1), " km"))),
+          tags$tr(tags$td(icon("map-pin"), " Coordinates"),
+                  tags$td(tags$small(round(loc$DDLat, 4), "N,",
+                                     round(loc$DDLon, 4), "W")))
+        )
+      )
+    )
+  })
+  
+  output$detail_timeseries <- renderPlotly({
+    d <- detail_data() %>%
+      filter(!Attribute %in% c("Cond (uS/cm)", "TDS (PPM)"))
+    
+    p <- ggplot(d, aes(x = Date_parsed, y = Value,
+                       color = Attribute, group = Attribute)) +
+      geom_line(linewidth = 0.8) +
+      geom_point(size = 2, aes(shape = Season)) +
+      scale_shape_manual(values = c("Dry" = 17, "Wet" = 16)) +
+      facet_wrap(~Attribute, scales = "free_y", ncol = 2) +
+      labs(x = NULL, y = NULL, color = NULL) +
+      theme_minimal(base_size = 10) +
+      theme(legend.position = "none",
+            strip.text = element_text(face = "bold", size = 9))
+    
+    ggplotly(p)
+  })
+  
+  output$detail_radar <- renderPlotly({
+    d <- detail_data()
+    latest <- d %>%
+      filter(!is.na(Value)) %>%
+      arrange(desc(Date_parsed)) %>%
+      slice(1) %>%
+      pull(Date_parsed)
+    
+    d_latest <- d %>%
+      filter(Date_parsed == latest) %>%
+      group_by(Attribute) %>%
+      summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop") %>%
+      mutate(pct_rank = percent_rank(Value))
+    
+    p <- ggplot(d_latest, aes(x = reorder(Attribute, Value),
+                              y = Value, fill = pct_rank)) +
+      geom_col() +
+      scale_fill_distiller(palette = "RdYlGn", direction = 1,
+                           name = "Relative\nrank") +
+      coord_flip() +
+      labs(x = NULL, y = "Measured value",
+           title = paste("Latest sample:", format(latest, "%d %b %Y"))) +
+      theme_minimal(base_size = 11)
+    
+    ggplotly(p)
+  })
+  
+  output$detail_table <- renderDT({
+    detail_data() %>%
+      select(Date = Date_parsed, Season, Attribute, Value,
+             Weather = CurrentWeather, Tide, Colour, Clarity, Odour) %>%
+      arrange(desc(Date), Attribute) %>%
+      datatable(filter = "top", rownames = FALSE,
+                options = list(pageLength = 15, scrollX = TRUE))
+  })
+  
+  ## Full Data Table ----
+  
+  output$full_table <- renderDT({
+    readings %>%
+      select(SiteID, Name, Date = Date_parsed, Season,
+             Attribute, Value, Habitat, Distance_from_mouth,
+             Weather = CurrentWeather, Tide) %>%
+      arrange(desc(Date)) %>%
+      datatable(filter = "top", rownames = FALSE,
+                options = list(pageLength = 20, scrollX = TRUE))
+  })
+}
