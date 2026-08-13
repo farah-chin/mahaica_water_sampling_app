@@ -179,6 +179,104 @@ ui <- page_navbar(
     )
   ),
   
+  # Site Pairs tab ----
+  nav_panel(
+    "Site Pairs",
+    icon = icon("code-compare"),
+    layout_sidebar(
+      sidebar = sidebar(
+        width = 270,
+        bg    = "#f0f4f8",
+        
+        tags$h6("Pair Selection", class = "text-muted fw-bold mt-1 mb-2"),
+        
+        selectInput("pair_id", "Site Pair",
+                    choices  = setNames(
+                      sapply(SITE_PAIRS, `[[`, "id"),
+                      sapply(SITE_PAIRS, `[[`, "label")
+                    ),
+                    selected = "pair1"),
+        
+        uiOutput("pair_site_labels_ui"),
+        
+        hr(),
+        
+        selectInput("pair_param", "Parameter",
+                    choices  = PARAMETERS,
+                    selected = "pH"),
+        
+        radioButtons("pair_season", "Season",
+                     choices  = SEASONS,
+                     selected = "All",
+                     inline   = TRUE),
+        
+        hr(),
+        
+        tags$h6("Date Range", class = "text-muted fw-bold"),
+        uiOutput("pair_date_slider_ui"),
+        
+        hr(),
+        
+        uiOutput("pair_description_ui")
+      ),
+      
+      div(
+        # Value boxes: mean difference and per-site means
+        layout_columns(
+          col_widths = c(4, 4, 4),
+          uiOutput("pair_vbox_a"),
+          uiOutput("pair_vbox_b"),
+          uiOutput("pair_vbox_diff")
+        ),
+        
+        tags$br(),
+        
+        # Time series comparison and box plots side by side
+        layout_columns(
+          col_widths = c(7, 5),
+          card(
+            full_screen = TRUE,
+            card_header(icon("chart-line"), " Time Series Comparison"),
+            plotlyOutput("pair_timeseries", height = "380px")
+          ),
+          card(
+            full_screen = TRUE,
+            card_header(icon("box"), " Distribution Comparison"),
+            plotlyOutput("pair_boxplot", height = "380px")
+          )
+        ),
+        
+        tags$br(),
+        
+        # Paired difference over time + scatter of A vs B
+        layout_columns(
+          col_widths = c(6, 6),
+          card(
+            full_screen = TRUE,
+            card_header(icon("arrow-right-arrow-left"), " Paired Difference Over Time (A − B)"),
+            plotlyOutput("pair_difference", height = "360px")
+          ),
+          card(
+            full_screen = TRUE,
+            card_header(icon("circle-nodes"), " Site A vs Site B"),
+            plotlyOutput("pair_scatter", height = "360px")
+          )
+        ),
+        
+        tags$br(),
+        
+        # Per-parameter mean difference bar chart
+        card(
+          full_screen = TRUE,
+          card_header(icon("chart-bar"), " Mean Difference by Parameter (A − B)"),
+          plotlyOutput("pair_param_diff", height = "360px")
+        ),
+        
+        tags$br()
+      )
+    )
+  ),
+  
   # Data tab ----
   nav_panel(
     "Data",

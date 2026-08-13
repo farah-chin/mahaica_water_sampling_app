@@ -29,7 +29,7 @@ supabase_get <- function(table, page_size = 1000) {
   repeat {
     url  <- paste0(SUPABASE_URL, "/rest/v1/", table,
                    "?select=*&limit=", page_size, "&offset=", offset)
-    resp <- GET(url, headers, timeout(10))
+    resp <- GET(url, headers)
     if (http_error(resp))
       stop("Supabase fetch failed for '", table, "': HTTP ", status_code(resp))
     page <- as.data.frame(
@@ -117,6 +117,25 @@ tryCatch({
   waterways_load_error <<- e$message
   message("Could not load waterways: ", e$message)
 })
+
+# Site Pairs ----
+
+SITE_PAIRS <- list(
+  list(id = "pair1", label = "Market (M3 vs M4)",
+       sites = c("M3", "M4"),
+       description = "Upstream vs downstream of market activity"),
+  list(id = "pair2", label = "Farming Activities (M5 vs M13)",
+       sites = c("M5", "M13"),
+       description = "Sites bracketing farming activity areas"),
+  list(id = "pair3", label = "Bifurcation (M17 vs M18)",
+       sites = c("M17", "M18"),
+       description = "Upstream vs downstream of river bifurcation"),
+  list(id = "pair4", label = "Pakuri (M20 vs M21)",
+       sites = c("M20", "M21"),
+       description = "Upstream vs downstream of Pakuri")
+)
+
+PAIR_COLS <- c("#2c7bb6", "#d7191c")   # blue = site A, red = site B
 
 # Constants ----
 

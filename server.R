@@ -372,18 +372,20 @@ server <- function(input, output, session) {
         summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop")
       
       if (show_all_seasons) {
-        # Overall mean (black dashed) + per-season thinner lines
-        d_overall <- d %>%
+        # Per-season points from raw data, overall mean as dashed black line
+        d_raw <- param_data() %>%
+          filter(SiteID == site_filter_d(), !is.na(Season))
+        d_overall <- d_raw %>%
           group_by(Date_parsed) %>%
-          summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop")
-        d_season <- d %>%
-          group_by(Date_parsed, Season) %>%
           summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop")
         
         p <- ggplot() +
-          geom_line(data = d_season,
+          geom_line(data = d_raw,
                     aes(x = Date_parsed, y = Value, color = Season, group = Season),
                     linewidth = 0.6, alpha = 0.8) +
+          geom_point(data = d_raw,
+                     aes(x = Date_parsed, y = Value, color = Season),
+                     size = 2, alpha = 0.9) +
           geom_line(data = d_overall,
                     aes(x = Date_parsed, y = Value, group = 1),
                     color = "grey20", linewidth = 1.2, linetype = "dashed") +
@@ -584,6 +586,223 @@ server <- function(input, output, session) {
       arrange(desc(Date), Attribute) %>%
       datatable(filter = "top", rownames = FALSE,
                 options = list(pageLength = 15, scrollX = TRUE))
+  })
+  
+  ## Site Pairs Tab ----
+  
+  # Debounced pair inputs
+  pair_id_d     <- reactive(input$pair_id)     %>% debounce(400)
+  pair_param_d  <- reactive(input$pair_param)  %>% debounce(400)
+  pair_season_d <- reactive(input$pair_season) %>% debounce(400)
+  pair_date_d   <- reactive(input$pair_date_range) %>% debounce(400)
+  
+  # Current pair metadata
+  current_pair <- reactive({
+    SITE_PAIRS[[which(sapply(SITE_PAIRS, `[[`, "id") == pair_id_d())]]
+  })
+  
+  output$pair_description_ui <- renderUI({
+    p <- current_pair()
+    tagList(
+      tags$small(class = "text-muted", p$description)
+    )
+  })
+  
+  output$pair_site_labels_ui <- renderUI({
+    p <- current_pair()
+    tagList(
+      tags$div(
+        style = "display:flex; gap:12px; margin-bottom:4px;",
+        tags$span(style = paste0("color:", PAIR_COLS[1], "; font-weight:bold;"),
+                  icon("circle"), " ", p$sites[1]),
+        tags$span(style = paste0("color:", PAIR_COLS[2], "; font-weight:bold;"),
+                  icon("circle"), " ", p$sites[2])
+      )
+    )
+  })
+  
+  output$pair_date_slider_ui <- renderUI({
+    dates <- sort(unique(readings$Date_parsed))
+    sliderInput("pair_date_range", NULL,
+                min        = min(dates),
+                max        = max(dates),
+                value      = c(min(dates), max(dates)),
+                timeFormat = "%b %Y",
+                step       = 30)
+  })
+  
+  # Filtered pair data — wide format with one column per site
+  pair_data_long <- reactive({
+    req(pair_date_d())
+    p  <- current_pair()
+    d  <- readings %>%
+      filter(SiteID %in% p$sites,
+             Attribute == pair_param_d(),
+             Date_parsed >= pair_date_d()[1],
+             Date_parsed <= pair_date_d()[2])
+    if (pair_season_d() != "All") d <- d %>% filter(Season == pair_season_d())
+    d
+  })
+  
+  pair_data_wide <- reactive({
+    p <- current_pair()
+    pair_data_long() %>%
+      select(Date_parsed, Season, SiteID, Value) %>%
+      pivot_wider(names_from = SiteID, values_from = Value,
+                  values_fn = mean) %>%
+      rename(site_a = all_of(p$sites[1]),
+             site_b = all_of(p$sites[2])) %>%
+      filter(!is.na(site_a) | !is.na(site_b)) %>%
+      mutate(difference = site_a - site_b)
+  })
+  
+  # Value boxes
+  output$pair_vbox_a <- renderUI({
+    p <- current_pair()
+    v <- mean(pair_data_long()$Value[pair_data_long()$SiteID == p$sites[1]], na.rm = TRUE)
+    value_box(
+      title    = paste("Mean", p$sites[1]),
+      value    = paste0(round(v, 2), " ", param_unit(pair_param_d())),
+      showcase = icon("circle", style = paste0("color:", PAIR_COLS[1])),
+      height   = "90px"
+    )
+  })
+  
+  output$pair_vbox_b <- renderUI({
+    p <- current_pair()
+    v <- mean(pair_data_long()$Value[pair_data_long()$SiteID == p$sites[2]], na.rm = TRUE)
+    value_box(
+      title    = paste("Mean", p$sites[2]),
+      value    = paste0(round(v, 2), " ", param_unit(pair_param_d())),
+      showcase = icon("circle", style = paste0("color:", PAIR_COLS[2])),
+      height   = "90px"
+    )
+  })
+  
+  output$pair_vbox_diff <- renderUI({
+    v    <- mean(pair_data_wide()$difference, na.rm = TRUE)
+    sign <- if (v > 0) "+" else ""
+    value_box(
+      title    = "Mean Difference (A − B)",
+      value    = paste0(sign, round(v, 2), " ", param_unit(pair_param_d())),
+      showcase = icon("arrow-right-arrow-left"),
+      theme    = if (abs(v) < 0.01) "secondary" else if (v > 0) "warning" else "info",
+      height   = "90px"
+    )
+  })
+  
+  # Time series comparison
+  output$pair_timeseries <- renderPlotly({
+    p <- current_pair()
+    d <- pair_data_long() %>%
+      group_by(SiteID, Date_parsed) %>%
+      summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop")
+    
+    cols <- setNames(PAIR_COLS, p$sites)
+    
+    gg <- ggplot(d, aes(x = Date_parsed, y = Value, color = SiteID, group = SiteID)) +
+      geom_line(linewidth = 0.9) +
+      geom_point(size = 2.5) +
+      scale_color_manual(values = cols) +
+      labs(x = NULL,
+           y = paste0(pair_param_d(), " (", param_unit(pair_param_d()), ")"),
+           color = NULL) +
+      theme_minimal(base_size = 11) +
+      theme(legend.position = "top")
+    
+    ggplotly(gg, tooltip = c("x", "y", "colour")) %>%
+      layout(hovermode = "x unified")
+  })
+  
+  # Distribution box plots
+  output$pair_boxplot <- renderPlotly({
+    p    <- current_pair()
+    d    <- pair_data_long()
+    cols <- setNames(PAIR_COLS, p$sites)
+    
+    gg <- ggplot(d, aes(x = SiteID, y = Value, fill = SiteID)) +
+      geom_boxplot(alpha = 0.7, outlier.shape = 21, outlier.size = 2) +
+      geom_jitter(width = 0.15, alpha = 0.3, size = 1) +
+      scale_fill_manual(values = cols) +
+      labs(x = NULL,
+           y = paste0(pair_param_d(), " (", param_unit(pair_param_d()), ")")) +
+      theme_minimal(base_size = 11) +
+      theme(legend.position = "none")
+    
+    ggplotly(gg)
+  })
+  
+  # Paired difference over time
+  output$pair_difference <- renderPlotly({
+    d <- pair_data_wide() %>% filter(!is.na(difference))
+    
+    gg <- ggplot(d, aes(x = Date_parsed, y = difference)) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+      geom_line(color = "grey30", linewidth = 0.8) +
+      geom_point(aes(color = difference > 0), size = 2.5, show.legend = FALSE) +
+      scale_color_manual(values = c("TRUE" = PAIR_COLS[1], "FALSE" = PAIR_COLS[2])) +
+      labs(x = NULL,
+           y = paste0("Δ ", pair_param_d(), " (", param_unit(pair_param_d()), ")")) +
+      theme_minimal(base_size = 11)
+    
+    ggplotly(gg, tooltip = c("x", "y")) %>%
+      layout(hovermode = "x unified")
+  })
+  
+  # Site A vs Site B scatter
+  output$pair_scatter <- renderPlotly({
+    p <- current_pair()
+    d <- pair_data_wide() %>% filter(!is.na(site_a), !is.na(site_b))
+    
+    gg <- ggplot(d, aes(x = site_a, y = site_b, color = Season)) +
+      geom_abline(slope = 1, intercept = 0,
+                  linetype = "dashed", color = "grey50") +
+      geom_point(size = 2.5, alpha = 0.8) +
+      geom_smooth(method = "lm", se = TRUE, linewidth = 0.8,
+                  aes(group = 1), color = "grey20", fill = "grey70",
+                  alpha = 0.15, inherit.aes = FALSE) +
+      scale_color_manual(values = SEASON_COLS, na.value = "grey60") +
+      labs(x = paste0(p$sites[1], " — ", pair_param_d(),
+                      " (", param_unit(pair_param_d()), ")"),
+           y = paste0(p$sites[2], " — ", pair_param_d(),
+                      " (", param_unit(pair_param_d()), ")"),
+           color = NULL) +
+      theme_minimal(base_size = 11) +
+      theme(legend.position = "top")
+    
+    ggplotly(gg, tooltip = c("x", "y", "colour"))
+  })
+  
+  # Mean difference by parameter bar chart
+  output$pair_param_diff <- renderPlotly({
+    req(pair_date_d())
+    p <- current_pair()
+    
+    d <- readings %>%
+      filter(SiteID %in% p$sites,
+             Date_parsed >= pair_date_d()[1],
+             Date_parsed <= pair_date_d()[2]) %>%
+      { if (pair_season_d() != "All") filter(., Season == pair_season_d()) else . } %>%
+      group_by(SiteID, Attribute) %>%
+      summarise(mean_val = mean(Value, na.rm = TRUE), .groups = "drop") %>%
+      pivot_wider(names_from = SiteID, values_from = mean_val) %>%
+      rename(site_a = all_of(p$sites[1]), site_b = all_of(p$sites[2])) %>%
+      filter(!is.na(site_a), !is.na(site_b)) %>%
+      mutate(diff      = site_a - site_b,
+             direction = if_else(diff >= 0, p$sites[1], p$sites[2]))
+    
+    cols <- setNames(PAIR_COLS, p$sites)
+    
+    gg <- ggplot(d, aes(x = reorder(Attribute, diff), y = diff, fill = direction)) +
+      geom_col() +
+      geom_hline(yintercept = 0, color = "grey30") +
+      scale_fill_manual(values = cols) +
+      coord_flip() +
+      labs(x = NULL, y = "Mean difference (A − B)", fill = "Higher at") +
+      theme_minimal(base_size = 11) +
+      theme(legend.position = "top")
+    
+    ggplotly(gg, tooltip = c("x", "y", "fill"))
   })
   
   ## Full Data Table ----
