@@ -258,8 +258,8 @@ ui <- page_navbar(
           ),
           card(
             full_screen = TRUE,
-            card_header(icon("circle-nodes"), " Site A vs Site B"),
-            plotlyOutput("pair_scatter", height = "360px")
+            card_header(icon("circle-nodes"), " Site A vs Site B")
+            # plotlyOutput("pair_scatter", height = "360px")
           )
         ),
         
