@@ -145,6 +145,14 @@ server <- function(input, output, session) {
   output$map <- renderLeaflet({
     leaflet() %>%
       addProviderTiles("Esri.WorldImagery") %>%
+      addLayersControl(
+        overlayGroups = c(
+          "Important Places"
+        ),
+        options = layersControlOptions(
+          collapsed = TRUE
+        )
+      ) %>%
       setView(lng = MAP_CENTER$lng, lat = MAP_CENTER$lat, zoom = MAP_CENTER$zoom) %>%
       htmlwidgets::onRender("
         function(el, x) {
@@ -185,6 +193,28 @@ server <- function(input, output, session) {
           fill       = FALSE
         )
     }
+    
+    proxy %>%
+      addLabelOnlyMarkers(
+        data = important_places,
+        label = ~ Name,
+        labelOptions = labelOptions(
+          noHide = TRUE,
+          direction = "top",
+          textOnly = TRUE,
+          style = list(
+            "font-size" = "10px",
+            "font-weight" = "400",
+            "color" = "#D3D3D3",
+            # "background-color" = "rgba(255,255,255,0.65)",
+            "border" = "none",
+            "padding" = "1px 3px",
+            "border-radius" = "2px",
+            "text-shadow" = "none"
+          )
+        ),
+        group = "Important Places"
+      )
     
     proxy %>%
       addCircleMarkers(

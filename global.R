@@ -13,6 +13,7 @@ library(lubridate)
 library(scales)
 library(DT)
 library(RColorBrewer)
+library(sf)
 
 # Data Loading ----
 
@@ -117,6 +118,23 @@ tryCatch({
   waterways_load_error <<- e$message
   message("Could not load waterways: ", e$message)
 })
+
+important_places_url <- paste0(
+  "https://services7.arcgis.com/3jO2fRV12whRxmim/",
+  "arcgis/rest/services/mahaica_important_places/",
+  "FeatureServer/0/query"
+)
+
+important_places <- st_read(
+  paste0(
+    important_places_url,
+    "?where=1%3D1",
+    "&outFields=*",
+    "&returnGeometry=true",
+    "&f=geojson"
+  ),
+  quiet = TRUE
+) %>% st_transform(4326)
 
 # Site Pairs ----
 
