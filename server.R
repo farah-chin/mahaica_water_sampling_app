@@ -784,13 +784,26 @@ server <- function(input, output, session) {
     p <- current_pair()
     d <- pair_data_wide() %>% filter(!is.na(site_a), !is.na(site_b))
     
+    # Calculate pearson correlation
+    r <- cor(d$site_a, d$site_b, method = "pearson")
+    
+    # Format correlation coefficient
+    r_label <- paste0("r = ", round(r, 2))
+    
     gg <- ggplot(d, aes(x = site_a, y = site_b, color = Season)) +
       geom_abline(slope = 1, intercept = 0,
                   linetype = "dashed", color = "grey50") +
       geom_point(size = 2.5, alpha = 0.8) +
       geom_smooth(method = "lm", se = TRUE, linewidth = 0.8,
-                  aes(group = 1), color = "grey20", fill = "grey70",
+                  aes(x = site_a, y = site_b), color = "grey20", fill = "grey70",
                   alpha = 0.15, inherit.aes = FALSE) +
+      # annotate("text", 
+      #          x = "Inf",
+      #          y = "Inf",
+      #          label = r_label,
+      #          hjust = 1.1,
+      #          vjust = 1.5,
+      #          size = 4) +
       scale_color_manual(values = SEASON_COLS, na.value = "grey60") +
       labs(x = paste0(p$sites[1], " — ", pair_param_d(),
                       " (", param_unit(pair_param_d()), ")"),
