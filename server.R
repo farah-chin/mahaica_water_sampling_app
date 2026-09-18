@@ -695,6 +695,12 @@ server <- function(input, output, session) {
       filter(!is.na(x_val), !is.na(y_val)) %>%
       mutate(tooltip = paste0("Site: ", SiteID, "<br>Date: ", Date_parsed))
     
+    # Calculate Pearson correlation
+    r <- cor(d_wide$x_val, d_wide$y_val, method = "pearson")
+    
+    # Format correlation coefficient
+    r_label <- paste0("r = ", round(r, 2))
+    
     p <- ggplot(d_wide, aes(x = x_val, y = y_val, color = Season)) +
       geom_point(alpha = 0.65, size = 2.5) +
       geom_smooth(
@@ -728,8 +734,26 @@ server <- function(input, output, session) {
         )
     }
     
-    ggplotly(p, tooltip = c("colour", "x", "y", "text")) %>%
+    plot <- ggplotly(p, tooltip = c("colour", "x", "y", "text")) %>%
       style(text = d_wide$tooltip, traces = 1)
+    
+    # add correlation annotation
+    plot <- plot %>%
+      layout(annotations = list(
+        list(
+          x = 0.98,
+          y = 0.98,
+          xref = "paper",
+          yref = "paper",
+          text = paste0("<b>r = ", round(r, 2), "</b>"),
+          showarrow = FALSE,
+          xanchor = "right",
+          yanchor = "top",
+          font = list(size = 14)
+        )
+      ))
+    
+    plot
   })
   
   ## Site Detail Tab ----
